@@ -63,6 +63,27 @@ const METHOD_LABELS: Record<string, string> = {
   manual: 'added manually',
 };
 
+/**
+ * Review order for the detection list. Names, emails, phone numbers and
+ * addresses always appear at the top; everything else follows.
+ */
+const DETECTION_GROUP_ORDER: { label: DetectionCandidate['label']; title: string }[] = [
+  { label: 'Person', title: 'Names' },
+  { label: 'Email', title: 'Email' },
+  { label: 'Phone', title: 'Phone numbers' },
+  { label: 'Address', title: 'Addresses' },
+  { label: 'Custom term', title: 'Custom terms' },
+  { label: 'Identifier', title: 'Identifiers' },
+  { label: 'Financial', title: 'Financial' },
+  { label: 'Organisation', title: 'Organisations' },
+];
+
+type RestoreConfirmation = {
+  values: number;
+  missing: number;
+  unknown: number;
+};
+
 function PdfPreview({ url, title }: { url: string; title: string }) {
   const [pages, setPages] = useState<string[]>([]);
   const [error, setError] = useState('');
@@ -210,6 +231,7 @@ function App() {
   const [editingCandidateId, setEditingCandidateId] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState('');
   const [sanitisationReport, setSanitisationReport] = useState<SanitisationReport | null>(null);
+  const [restoreConfirmation, setRestoreConfirmation] = useState<RestoreConfirmation | null>(null);
 
   useEffect(() => {
     if (!purgeLegacySessionStorage()) {
@@ -269,6 +291,72 @@ function App() {
     () => (replacements.length > 0 && restorationText ? validateReturnedText(restorationText, replacements) : null),
     [restorationText, replacements],
   );
+
+  /** Detections grouped for review, in DETECTION_GROUP_ORDER, sorted by first occurrence. */
+  const groupedCandidates = useMemo(() => {
+    const positionOf = (candidate: DetectionCandidate) =>
+      candidate.occurrences.length > 0 ? candidate.occurrences[0].start : Number.MAX_SAFE_INTEGER;
+    const sortItems = (items: DetectionCandidate[]) =>
+      [...items].sort((left, right) => positionOf(left) - positionOf(right));
+
+    const remaining = new Map<DetectionCandidate['label'], DetectionCandidate[]>();
+    for (const candidate of candidates) {
+      const items = remaining.get(candidate.label) ?? [];
+      items.push(candidate);
+      remaining.set(candidate.label, items);
+    }
+
+    const groups = DETECTION_GROUP_ORDER.flatMap(({ label, title }) => {
+      const items = remaining.get(label);
+      if (!items || items.length === 0) {
+        return [];
+      }
+      remaining.delete(label);
+      return [{ label, title, items: sortItems(items) }];
+    });
+
+    for (const [label, items] of remaining) {
+      if (items.length > 0) {
+        groups.push({ label, title: label, items: sortItems(items) });
+      }
+    }
+
+    return groups;
+  }, [candidates]);
+
+  /** Progress card state: detect → sanitise → restore. */
+  const workflowSteps = useMemo(() => {
+    const detected = candidates.length > 0;
+    const sanitised = replacements.length > 0;
+    const restored = restoreConfirmation !== null;
+
+    return [
+      {
+        n: 1,
+        label: 'Detect',
+        hint: detected ? `${candidates.length} detection${candidates.length === 1 ? '' : 's'} to review` : 'Scan your content',
+        status: detected ? 'done' : 'current',
+      },
+      {
+        n: 2,
+        label: 'Sanitise',
+        hint: sanitised
+          ? `${replacements.length} placeholder${replacements.length === 1 ? '' : 's'} written`
+          : 'Approve values and replace',
+        status: sanitised || restored ? 'done' : detected ? 'current' : 'upcoming',
+      },
+      {
+        n: 3,
+        label: 'Restore',
+        hint: restored
+          ? `${restoreConfirmation?.values ?? 0} value${restoreConfirmation?.values === 1 ? '' : 's'} restored`
+          : sanitised
+            ? 'Paste the AI output and restore'
+            : 'Waiting on sanitised output',
+        status: restored ? 'done' : sanitised ? 'current' : 'upcoming',
+      },
+    ];
+  }, [candidates.length, replacements.length, restoreConfirmation]);
 
   const createHtmlPreview = (html: string) => `<!doctype html>
     <html lang="en">
@@ -387,6 +475,27 @@ function App() {
     });
   };
 
+  const handleToggleGroup = (items: DetectionCandidate[]) => {
+    const allSelected = items.every((item) => selectedCandidateIds.has(item.id));
+    setSelectedCandidateIds((current) => {
+      const next = new Set(current);
+      for (const item of items) {
+        if (allSelected) {
+          next.delete(item.id);
+        } else {
+          next.add(item.id);
+        }
+      }
+      return next;
+    });
+  };
+
+  const handleToggleAll = () => {
+    setSelectedCandidateIds((current) =>
+      current.size === candidates.length ? new Set() : new Set(candidates.map((candidate) => candidate.id)),
+    );
+  };
+
   const handleAddManualDetection = () => {
     const value = manualValue.trim();
     if (!value) {
@@ -451,6 +560,7 @@ function App() {
     setSanitisedText(result.text);
     setReplacements(result.replacements);
     setRestorationText(result.text);
+    setRestoreConfirmation(null);
     setExportError('');
 
     try {
@@ -534,8 +644,17 @@ function App() {
   };
 
   const handleRestore = () => {
+    if (!placeholderReport || placeholderReport.restore.length === 0) {
+      return;
+    }
+
     const restored = restoreText(restorationText, replacements);
     setRestorationText(restored);
+    setRestoreConfirmation({
+      values: placeholderReport.restore.length,
+      missing: placeholderReport.missing.length,
+      unknown: placeholderReport.unknown.length,
+    });
   };
 
   const handleDownload = (content: string, label: string, format: DownloadFormat = downloadFormat) => {
@@ -645,6 +764,7 @@ function App() {
     setEditingCandidateId(null);
     setEditingValue('');
     setSanitisationReport(null);
+    setRestoreConfirmation(null);
   };
 
   return (
@@ -660,7 +780,7 @@ function App() {
         </button>
       </header>
 
-      <main className="layout-grid">
+      <main className="workspace">
         <section className="panel">
           <div className="panel-header">
             <h2>1. Original content</h2>
@@ -852,64 +972,110 @@ function App() {
 
           {candidates.length > 0 && (
             <div className="candidate-list">
-              <h3>Review detections</h3>
-              {candidates.map((candidate) => {
-                const occurrenceCount = candidate.occurrences.length;
+              <div className="candidate-list-header">
+                <h3>Review detections</h3>
+                <span className="candidate-list-tools">
+                  <span className="selection-count">
+                    {selectedCandidateIds.size} of {candidates.length} selected
+                  </span>
+                  <button type="button" className="mini-button" onClick={handleToggleAll}>
+                    {selectedCandidateIds.size === candidates.length ? 'Clear all' : 'Select all'}
+                  </button>
+                </span>
+              </div>
+
+              {groupedCandidates.map((group) => {
+                const selectedInGroup = group.items.filter((item) => selectedCandidateIds.has(item.id)).length;
+                const allSelected = selectedInGroup === group.items.length;
+                const someSelected = selectedInGroup > 0 && !allSelected;
+
                 return (
-                  <div key={candidate.id} className="candidate-row">
-                    <label className="candidate-select">
-                      <input
-                        type="checkbox"
-                        checked={selectedCandidateIds.has(candidate.id)}
-                        onChange={() => handleToggleCandidate(candidate.id)}
-                      />
-                      <span className="candidate-content">
-                        {editingCandidateId === candidate.id ? (
-                          <input
-                            className="candidate-edit"
-                            value={editingValue}
-                            autoFocus
-                            onChange={(event) => setEditingValue(event.target.value)}
-                            onBlur={commitCandidateEdit}
-                            onKeyDown={(event) => {
-                              if (event.key === 'Enter') {
-                                event.preventDefault();
-                                commitCandidateEdit();
-                              } else if (event.key === 'Escape') {
-                                event.preventDefault();
-                                cancelCandidateEdit();
+                  <div key={group.label} className="candidate-group">
+                    <div className="group-header">
+                      <label className="group-select">
+                        <input
+                          type="checkbox"
+                          checked={allSelected}
+                          ref={(element) => {
+                            if (element) {
+                              element.indeterminate = someSelected;
+                            }
+                          }}
+                          onChange={() => handleToggleGroup(group.items)}
+                        />
+                        <span className="group-title">{group.title}</span>
+                      </label>
+                      <span className="group-count">
+                        {selectedInGroup}/{group.items.length}
+                      </span>
+                    </div>
+
+                    {group.items.map((candidate) => {
+                      const occurrenceCount = candidate.occurrences.length;
+                      return (
+                        <div key={candidate.id} className="candidate-row">
+                          <label className="candidate-select">
+                            <input
+                              type="checkbox"
+                              checked={selectedCandidateIds.has(candidate.id)}
+                              onChange={() => handleToggleCandidate(candidate.id)}
+                            />
+                            <span className="candidate-content">
+                              {editingCandidateId === candidate.id ? (
+                                <input
+                                  className="candidate-edit"
+                                  value={editingValue}
+                                  autoFocus
+                                  onChange={(event) => setEditingValue(event.target.value)}
+                                  onBlur={commitCandidateEdit}
+                                  onKeyDown={(event) => {
+                                    if (event.key === 'Enter') {
+                                      event.preventDefault();
+                                      commitCandidateEdit();
+                                    } else if (event.key === 'Escape') {
+                                      event.preventDefault();
+                                      cancelCandidateEdit();
+                                    }
+                                  }}
+                                />
+                              ) : (
+                                <span className="candidate-value">{candidate.value}</span>
+                              )}
+                              <span className="candidate-meta">
+                                <span className="chip">{METHOD_LABELS[candidate.method] ?? candidate.method}</span>
+                                <span className="chip">
+                                  {occurrenceCount} occurrence{occurrenceCount === 1 ? '' : 's'}
+                                  {occurrenceCount === 0 ? ' in text' : ''}
+                                </span>
+                                <span className="candidate-reason">{candidate.reason}</span>
+                              </span>
+                            </span>
+                          </label>
+                          <span className="candidate-actions">
+                            <span className={`confidence ${candidate.confidence}`}>
+                              {candidate.confidence === 'high' ? 'Pattern match' : 'Review'}
+                            </span>
+                            <button
+                              type="button"
+                              className="mini-button"
+                              onClick={() =>
+                                editingCandidateId === candidate.id
+                                  ? commitCandidateEdit()
+                                  : startEditingCandidate(candidate)
                               }
-                            }}
-                          />
-                        ) : (
-                          <span className="candidate-value">{candidate.value}</span>
-                        )}
-                        <span className="candidate-reason">
-                          {candidate.label} · {METHOD_LABELS[candidate.method] ?? candidate.method} ·{' '}
-                          {occurrenceCount} occurrence{occurrenceCount === 1 ? '' : 's'}
-                          {occurrenceCount === 0 ? ' in the inspected text' : ''} · {candidate.reason}
-                        </span>
-                      </span>
-                    </label>
-                    <span className="candidate-actions">
-                      <span className={`confidence ${candidate.confidence}`}>
-                        {candidate.confidence === 'high' ? 'Pattern match' : 'Review'}
-                      </span>
-                      <button
-                        type="button"
-                        className="mini-button"
-                        onClick={() =>
-                          editingCandidateId === candidate.id ? commitCandidateEdit() : startEditingCandidate(candidate)
-                        }
-                      >
-                        {editingCandidateId === candidate.id ? 'Done' : 'Edit'}
-                      </button>
-                    </span>
+                            >
+                              {editingCandidateId === candidate.id ? 'Done' : 'Edit'}
+                            </button>
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
                 );
               })}
+
               <button
-                className="primary-button"
+                className="primary-button sanitise-button"
                 onClick={handleSanitise}
                 disabled={selectedCandidateIds.size === 0 || isUploading || isSanitising}
               >
@@ -919,58 +1085,75 @@ function App() {
           )}
         </section>
 
-        <section className="panel">
-          <div className="panel-header">
-            <h2>2. Sanitised output</h2>
-            {sanitisedText && (
-              <div className="download-controls">
-                <select value={downloadFormat} onChange={(event) => setDownloadFormat(event.target.value as DownloadFormat)}>
-                  <option value="pdf">PDF</option>
-                  <option value="txt">TXT</option>
-                  <option value="md">Markdown</option>
-                </select>
-                <button className="ghost-button compact" onClick={() => handleDownload(sanitisedText, 'sanitised')}>
-                  Download
-                </button>
-              </div>
+        <aside className="workspace-side">
+          <section className="panel">
+            <div className="panel-header">
+              <h2>2. Sanitised output</h2>
+              {sanitisedText && (
+                <div className="download-controls">
+                  <select value={downloadFormat} onChange={(event) => setDownloadFormat(event.target.value as DownloadFormat)}>
+                    <option value="pdf">PDF</option>
+                    <option value="txt">TXT</option>
+                    <option value="md">Markdown</option>
+                  </select>
+                  <button className="ghost-button compact" onClick={() => handleDownload(sanitisedText, 'sanitised')}>
+                    Download
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {uploadedDocuments.length > 0 && (
+              <p className="upload-hint">
+                This text view is for review. Per-file sanitised downloads retain the uploaded format and layout where supported.
+              </p>
             )}
+            <textarea value={sanitisedText} onChange={(event) => setSanitisedText(event.target.value)} rows={9} />
+
+            {exportError && <p className="upload-error">{exportError}</p>}
+          </section>
+
+          <div className="side-card">
+            <h3>Workflow</h3>
+            <ol className="step-list">
+              {workflowSteps.map((step) => (
+                <li key={step.n} className={`step ${step.status}`}>
+                  <span className="step-marker">{step.status === 'done' ? '✓' : step.n}</span>
+                  <span className="step-body">
+                    <strong>{step.label}</strong>
+                    <em>{step.hint}</em>
+                  </span>
+                </li>
+              ))}
+            </ol>
           </div>
 
-          {uploadedDocuments.length > 0 && (
-            <p className="upload-hint">
-              This text view is for review. Per-file sanitised downloads retain the uploaded format and layout where supported.
-            </p>
-          )}
-          <textarea value={sanitisedText} onChange={(event) => setSanitisedText(event.target.value)} rows={12} />
-
-          <div className="session-box">
-            <label htmlFor="session-name">Session name</label>
-            <input
-              id="session-name"
-              value={sessionName}
-              onChange={(event) => setSessionName(event.target.value)}
-            />
-          </div>
-
-          <div className="stats-grid">
-            {detectionSummary.map((item) => (
-              <div key={item.label} className="stat-card">
-                <span>{item.label}</span>
-                <strong>{item.count}</strong>
-              </div>
-            ))}
+          <div className="side-card">
+            <h3>Placeholder summary</h3>
+            <div className="stats-grid">
+              {detectionSummary.map((item) => (
+                <div key={item.label} className="stat-card">
+                  <span>{item.label}</span>
+                  <strong>{item.count}</strong>
+                </div>
+              ))}
+              {detectionSummary.length === 0 && (
+                <p className="side-empty">
+                  Nothing sanitised yet — approve detections and run sanitise to build the mapping.
+                </p>
+              )}
+            </div>
           </div>
 
           {sanitisationReport && (
             <div
-              className={`validation-report ${sanitisationReport.ok ? 'report-ok' : 'report-warning'}`}
+              className={`side-card validation-report ${sanitisationReport.ok ? 'report-ok' : 'report-warning'}`}
               role="status"
             >
               <h3>Pre-export validation</h3>
               <p>
                 {sanitisationReport.placeholderCount} placeholder
-                {sanitisationReport.placeholderCount === 1 ? '' : 's'} written for{' '}
-                {selectedCandidateIds.size} approved value{selectedCandidateIds.size === 1 ? '' : 's'}.
+                {sanitisationReport.placeholderCount === 1 ? '' : 's'} written for your approved detections.
               </p>
               {sanitisationReport.ok ? (
                 <p>No approved values were found remaining in the sanitised text.</p>
@@ -1011,8 +1194,31 @@ function App() {
             </div>
           )}
 
-          {exportError && <p className="upload-error">{exportError}</p>}
-        </section>
+          <div className="side-card session-box">
+            <label htmlFor="session-name">Session name</label>
+            <input
+              id="session-name"
+              value={sessionName}
+              onChange={(event) => setSessionName(event.target.value)}
+            />
+          </div>
+
+          {replacements.length > 0 && (
+            <div className="side-card mapping-panel">
+              <h3>Temporary mapping</h3>
+              <ul>
+                {replacements.map((item) => (
+                  <li key={item.id}>
+                    <span className="placeholder">{item.placeholder}</span>
+                    <span className="arrow">→</span>
+                    <span>{item.original}</span>
+                    <em>({item.label})</em>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </aside>
       </main>
 
       <section className="panel restore-panel">
@@ -1034,57 +1240,83 @@ function App() {
 
         <textarea
           value={restorationText}
-          onChange={(event) => setRestorationText(event.target.value)}
+          onChange={(event) => {
+            setRestorationText(event.target.value);
+            setRestoreConfirmation(null);
+          }}
           rows={12}
           placeholder="Paste the AI-processed version here to restore original values..."
         />
 
-        {placeholderReport && (
-          <div className="validation-report" role="status">
-            <h3>Placeholder check</h3>
+        {restoreConfirmation !== null ? (
+          <div className="validation-report report-ok" role="status">
+            <h3>Restoration complete</h3>
             <p>
-              {placeholderReport.totalFound} placeholder occurrence
-              {placeholderReport.totalFound === 1 ? '' : 's'} found · {placeholderReport.restore.length} value
-              {placeholderReport.restore.length === 1 ? '' : 's'} ready to restore ·{' '}
-              {placeholderReport.missing.length} missing · {placeholderReport.unknown.length} unknown
+              {restoreConfirmation.values} value{restoreConfirmation.values === 1 ? '' : 's'} restored into the
+              returned text.
             </p>
-            {placeholderReport.restore.length > 0 && (
-              <ul>
-                {placeholderReport.restore.map((item) => (
-                  <li key={item.placeholder}>
-                    <span className="placeholder">{item.placeholder}</span>
-                    <span className="arrow">→</span>
-                    <span>{item.original}</span>
-                    <em>
-                      ({item.label}
-                      {item.count > 1 ? `, ${item.count}×` : ''}
-                      {item.caseAdjusted ? ', case-adjusted' : ''})
-                    </em>
-                  </li>
-                ))}
-              </ul>
+            {restoreConfirmation.missing > 0 && (
+              <p>
+                {restoreConfirmation.missing} placeholder{restoreConfirmation.missing === 1 ? '' : 's'} the AI
+                removed or rewrote could not be restored automatically — review those passages manually.
+              </p>
             )}
-            {placeholderReport.missing.length > 0 && (
-              <ul className="report-warnings">
-                {placeholderReport.missing.map((item) => (
-                  <li key={item.placeholder}>
-                    <span className="placeholder">{item.placeholder}</span> — not found in the returned text. This
-                    value cannot be restored automatically; check whether the AI removed or rewrote it.
-                  </li>
-                ))}
-              </ul>
-            )}
-            {placeholderReport.unknown.length > 0 && (
-              <ul className="report-warnings">
-                {placeholderReport.unknown.map((token) => (
-                  <li key={token}>
-                    <span className="placeholder">{token}</span> — not in this session's mapping. It will never be
-                    restored automatically.
-                  </li>
-                ))}
-              </ul>
+            {restoreConfirmation.unknown > 0 && (
+              <p>
+                {restoreConfirmation.unknown} unknown token{restoreConfirmation.unknown === 1 ? '' : 's'}{' '}
+                {restoreConfirmation.unknown === 1 ? 'was' : 'were'} left untouched, as {restoreConfirmation.unknown === 1 ? 'it has' : 'they have'} no
+                mapping in this session.
+              </p>
             )}
           </div>
+        ) : (
+          placeholderReport && (
+            <div className="validation-report" role="status">
+              <h3>Placeholder check</h3>
+              <p>
+                {placeholderReport.totalFound} placeholder occurrence
+                {placeholderReport.totalFound === 1 ? '' : 's'} found · {placeholderReport.restore.length} value
+                {placeholderReport.restore.length === 1 ? '' : 's'} ready to restore ·{' '}
+                {placeholderReport.missing.length} missing · {placeholderReport.unknown.length} unknown
+              </p>
+              {placeholderReport.restore.length > 0 && (
+                <ul>
+                  {placeholderReport.restore.map((item) => (
+                    <li key={item.placeholder}>
+                      <span className="placeholder">{item.placeholder}</span>
+                      <span className="arrow">→</span>
+                      <span>{item.original}</span>
+                      <em>
+                        ({item.label}
+                        {item.count > 1 ? `, ${item.count}×` : ''}
+                        {item.caseAdjusted ? ', case-adjusted' : ''})
+                      </em>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {placeholderReport.missing.length > 0 && (
+                <ul className="report-warnings">
+                  {placeholderReport.missing.map((item) => (
+                    <li key={item.placeholder}>
+                      <span className="placeholder">{item.placeholder}</span> — not found in the returned text. This
+                      value cannot be restored automatically; check whether the AI removed or rewrote it.
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {placeholderReport.unknown.length > 0 && (
+                <ul className="report-warnings">
+                  {placeholderReport.unknown.map((token) => (
+                    <li key={token}>
+                      <span className="placeholder">{token}</span> — not in this session's mapping. It will never be
+                      restored automatically.
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )
         )}
 
         <div className="toolbar">
@@ -1098,7 +1330,7 @@ function App() {
               : 'Restore sensitive values'}
           </button>
         </div>
-        {placeholderReport && placeholderReport.restore.length === 0 && (
+        {restoreConfirmation === null && placeholderReport && placeholderReport.restore.length === 0 && (
           <p className="detection-message">
             No valid placeholders were found in the returned text, so there is nothing to restore.
           </p>
@@ -1125,22 +1357,6 @@ function App() {
           ))}
           <p>Text in Word paragraphs is restored; review images, metadata, and the complete document before using it.</p>
         </div>
-
-        {replacements.length > 0 && (
-          <div className="mapping-panel">
-            <h3>Temporary mapping</h3>
-            <ul>
-              {replacements.map((item) => (
-                <li key={item.id}>
-                  <span className="placeholder">{item.placeholder}</span>
-                  <span className="arrow">→</span>
-                  <span>{item.original}</span>
-                  <em>({item.label})</em>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
       </section>
     </div>
   );

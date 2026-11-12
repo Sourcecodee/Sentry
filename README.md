@@ -14,6 +14,39 @@ Sentry is a local-first privacy companion for preparing sensitive information be
 - Allow users to paste AI-processed output back and restore originals.
 - Keep original values and mappings in memory for the active page session only; refreshing or clearing ends the session.
 
+## Detection engine
+
+Detection is a separate module from sanitisation and restoration (`src/detection/`), built as replaceable recognisers that report through one normalised result shape — entity type, value, reason, detection method, confidence, and the positions of every occurrence:
+
+| Module | Stage | Role |
+|---|---|---|
+| `regexRecognizer` | 10 | Deterministic patterns: emails, phone-like values |
+| `contextRecognizer` (names) | 20 | Values after field labels (`Name:`, `Address:`…) and titles (`Dr …`) |
+| `nameDetectionService` | 30 | Capitalised, name-like runs — always review-only suggestions |
+| `contextRecognizer` (fields) | 40 | Address, identifier (incl. Nigerian NIN/BVN), financial and organisation labels |
+| `userDefinedRecognizer` | 50 | Custom terms plus controlled shortened forms of confirmed names |
+
+- Every detection is explainable: the review list shows category, method, occurrence count and reason, and detections can be edited inline or added manually when a rule misses them.
+- Confirmed multi-token names offer shortened-form proposals (e.g. `Yusuf Hyelapa Mshelia` → `Yusuf Mshelia`, `Mshelia`). Proposals are never preselected; common words, lowercase terms and organisation suffixes are never proposed.
+- Detection is deterministic and local. No text leaves the browser, and no detector is described as complete.
+
+## Validation and restoration checks
+
+- **Pre-export validation** searches the sanitised text — and each uploaded file's extracted text — for approved values that still remain, and lists detected values you left unprotected. Warnings are shown per file and for the text view.
+- **Placeholder check** runs live on the returned AI text: it previews every value that will be restored, reports mapped placeholders the AI removed or rewrote, and flags placeholder-shaped tokens with no mapping. Unknown tokens are never restored automatically; case-adjusted placeholders (e.g. `[email_001]`) are restored and labelled as such.
+- Restoration requires explicit approval, and a completion summary reports what was restored, what was missing and what was left untouched.
+- Ending the session (header button) revokes all document URLs and clears detections and the mapping from memory.
+
+## Workspace layout
+
+The interface is a two-column workspace with a refined slate/indigo theme:
+
+- **Left column — detection and review.** Uploaded documents, extracted text, custom terms and the detection review list.
+- **Right column — sticky summary.** Sanitised output, a workflow status card (detect → sanitise → restore), the placeholder summary, the pre-export validation report, the session name and the temporary mapping. It stays in view while you scroll the review list.
+- **Full width — restore.** The restore panel sits below both columns, with the live placeholder check and approval flow.
+- The review list is grouped so the most important categories always appear first: **Names → Email → Phone numbers → Addresses**, followed by custom terms, identifiers, financial values and organisations. Each group has a select-all checkbox with a selected count, and detections inside a group are ordered by their first occurrence in the text.
+- The layout collapses to a single column on narrow screens.
+
 ## Format and detection limitations
 
 - DOCX sanitisation edits the original document package and retains its structure and styling. The in-app DOCX preview is a structural preview; the downloaded DOCX is the layout-preserving artifact. Image text and document metadata are not inspected; review those manually. Embedded objects and unusual Word content may also need manual review.

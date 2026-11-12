@@ -596,6 +596,31 @@ em {
   border-radius: 999px;
 }
 
+.group-header-secret {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.group-header-secret .group-title {
+  color: #b91c1c;
+}
+
+.group-header-secret .group-count {
+  color: #b91c1c;
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.format-note {
+  margin: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 10px;
+  color: #b45309;
+  font-size: 0.82rem;
+}
+
 .candidate-row {
   display: flex;
   align-items: flex-start;
@@ -668,6 +693,12 @@ em {
   font-size: 0.7rem;
   font-weight: 600;
   white-space: nowrap;
+}
+
+.chip.chip-secret {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #b91c1c;
 }
 
 .candidate-reason {

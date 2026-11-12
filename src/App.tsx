@@ -6,7 +6,6 @@ import { restoreDocx, sanitiseDocx } from './docx';
 import { createRebuiltTextPdf, extractPdfText, replacePdfTextMatches } from './pdfSanitization';
 import {
   detectSensitiveInformation,
-  replaceMappedValues,
   restoreText,
   sanitiseSelected,
   type DetectionCandidate,
@@ -19,6 +18,7 @@ import {
   type PlaceholderReport,
   type SanitisationReport,
 } from './detection';
+import { detectStructuredFormat, replaceStructuredMappedValues } from './structuredReplacement';
 import { END_SESSION_PROMPT, purgeLegacySessionStorage, revokeSessionMedia } from './session';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -41,6 +41,8 @@ type UploadedDocument = {
   sanitisedReplacementCount?: number;
   /** Approved values still present in this file's sanitised text, if checked. */
   sanitisedLeftovers?: string[];
+  /** Format warning (e.g. invalid JSON) shown next to the sanitised file. */
+  sanitisedFormatNote?: string;
 };
 
 const TEXT_EXTENSIONS = new Set([
@@ -48,12 +50,20 @@ const TEXT_EXTENSIONS = new Set([
   'md',
   'csv',
   'json',
+  'jsonl',
+  'ndjson',
   'xml',
   'html',
   'htm',
   'log',
   'yml',
   'yaml',
+  'toml',
+  'ini',
+  'conf',
+  'cfg',
+  'properties',
+  'env',
 ]);
 const METHOD_LABELS: Record<string, string> = {
   pattern: 'local pattern',
@@ -64,10 +74,12 @@ const METHOD_LABELS: Record<string, string> = {
 };
 
 /**
- * Review order for the detection list. Names, emails, phone numbers and
- * addresses always appear at the top; everything else follows.
+ * Review order for the detection list. Secrets and API keys lead (a leaked
+ * key is the worst-case incident), then names, emails, phone numbers and
+ * addresses; everything else follows.
  */
 const DETECTION_GROUP_ORDER: { label: DetectionCandidate['label']; title: string }[] = [
+  { label: 'Secret', title: 'Secrets & API keys' },
   { label: 'Person', title: 'Names' },
   { label: 'Email', title: 'Email' },
   { label: 'Phone', title: 'Phone numbers' },
@@ -77,6 +89,18 @@ const DETECTION_GROUP_ORDER: { label: DetectionCandidate['label']; title: string
   { label: 'Financial', title: 'Financial' },
   { label: 'Organisation', title: 'Organisations' },
 ];
+
+/** Deterministic findings (emails, provider API keys) start preselected; everything else needs approval. */
+function defaultSelection(found: DetectionCandidate[]): Set<string> {
+  return new Set(
+    found
+      .filter(
+        (candidate) =>
+          candidate.label === 'Email' || (candidate.label === 'Secret' && candidate.confidence === 'high'),
+      )
+      .map((candidate) => candidate.id),
+  );
+}
 
 type RestoreConfirmation = {
   values: number;
@@ -255,9 +279,7 @@ function App() {
 
     const found = detectSensitiveInformation(sourceText, customTerms, { proposeNameVariations: true });
     setCandidates(found);
-    setSelectedCandidateIds(
-      new Set(found.filter((candidate) => candidate.label === 'Email').map((candidate) => candidate.id)),
-    );
+    setSelectedCandidateIds(defaultSelection(found));
     setDetectionMessage(
       found.length
         ? `${found.length} possible match${found.length === 1 ? '' : 'es'} found. Review the suggestions below — method, occurrences and reason are shown for each — before sanitising.`
@@ -272,11 +294,20 @@ function App() {
     '.md',
     '.csv',
     '.json',
+    '.jsonl',
+    '.ndjson',
     '.xml',
     '.html',
     '.htm',
     '.yaml',
     '.yml',
+    '.toml',
+    '.ini',
+    '.conf',
+    '.cfg',
+    '.properties',
+    '.env',
+    '.env.*',
   ].join(',');
 
   const detectionSummary = useMemo(() => {
@@ -452,13 +483,11 @@ function App() {
   const handleDetect = () => {
     const found = detectSensitiveInformation(sourceText, customTerms, { proposeNameVariations: true });
     setCandidates(found);
-    setSelectedCandidateIds(
-      new Set(found.filter((candidate) => candidate.label === 'Email').map((candidate) => candidate.id)),
-    );
+    setSelectedCandidateIds(defaultSelection(found));
     setSanitisationReport(null);
     setDetectionMessage(
       found.length
-        ? 'Review suggestions before sanitising. Only email matches are preselected; names, phone-like values, and custom terms require your approval.'
+        ? 'Review suggestions before sanitising. Emails and known API keys are preselected; names, phone-like values, and custom terms require your approval.'
         : 'No supported sensitive information patterns were found. You can add custom terms and scan again.',
     );
   };
@@ -579,6 +608,7 @@ function App() {
           let sanitisedText: string | undefined;
           let sanitisedReplacementCount: number | undefined;
           let validationText: string | undefined;
+          let formatNote: string | undefined;
 
           if (extension === 'docx') {
             outputBlob = await sanitiseDocx(uploaded.file, result.replacements);
@@ -592,7 +622,13 @@ function App() {
             sanitisedReplacementCount = pdfResult.replacementsApplied;
             validationText = pdfResult.text;
           } else {
-            sanitisedText = replaceMappedValues(uploaded.text, result.replacements);
+            const structured = replaceStructuredMappedValues(
+              uploaded.text,
+              result.replacements,
+              detectStructuredFormat(uploaded.file.name),
+            );
+            sanitisedText = structured.text;
+            formatNote = structured.note;
             validationText = sanitisedText;
             outputBlob = new Blob([sanitisedText], {
               type: uploaded.file.type || 'text/plain;charset=utf-8',
@@ -614,6 +650,7 @@ function App() {
             sanitisedText,
             sanitisedReplacementCount,
             sanitisedLeftovers: leftovers,
+            sanitisedFormatNote: formatNote,
           });
         } catch (error) {
           updatedDocuments.push({
@@ -624,6 +661,7 @@ function App() {
             sanitisedText: undefined,
             sanitisedReplacementCount: undefined,
             sanitisedLeftovers: undefined,
+            sanitisedFormatNote: undefined,
           });
           outputErrors.push(
             `${uploaded.file.name}: ${error instanceof Error ? error.message : 'formatted output could not be prepared.'}`,
@@ -868,11 +906,17 @@ function App() {
                             : 'No selected values matched the extracted PDF text.'}
                         </p>
                       )}
+                      {document.sanitisedFormatNote && (
+                        <p className="format-note" role="alert">
+                          {document.sanitisedFormatNote}
+                        </p>
+                      )}
                       {document.sanitisedLeftovers !== undefined &&
                         (document.sanitisedLeftovers.length > 0 ? (
                           <p className="validation-error" role="alert">
                             {document.sanitisedLeftovers.length} approved value
-                            {document.sanitisedLeftovers.length === 1 ? '' : 's'} still appear in this sanitised file:{' '}
+                            {document.sanitisedLeftovers.length === 1 ? ' still appears' : 's still appear'} in this
+                            sanitised file:{' '}
                             {document.sanitisedLeftovers.join(', ')}. Review before sharing.
                           </p>
                         ) : (
@@ -991,7 +1035,7 @@ function App() {
 
                 return (
                   <div key={group.label} className="candidate-group">
-                    <div className="group-header">
+                    <div className={`group-header${group.label === 'Secret' ? ' group-header-secret' : ''}`}>
                       <label className="group-select">
                         <input
                           type="checkbox"
@@ -1042,7 +1086,11 @@ function App() {
                                 <span className="candidate-value">{candidate.value}</span>
                               )}
                               <span className="candidate-meta">
-                                <span className="chip">{METHOD_LABELS[candidate.method] ?? candidate.method}</span>
+                                <span
+                                  className={`chip${candidate.label === 'Secret' ? ' chip-secret' : ''}`}
+                                >
+                                  {METHOD_LABELS[candidate.method] ?? candidate.method}
+                                </span>
                                 <span className="chip">
                                   {occurrenceCount} occurrence{occurrenceCount === 1 ? '' : 's'}
                                   {occurrenceCount === 0 ? ' in text' : ''}

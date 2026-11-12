@@ -11,6 +11,7 @@ export type DetectionLabel =
   | 'Phone'
   | 'Person'
   | 'Address'
+  | 'Secret'
   | 'Identifier'
   | 'Financial'
   | 'Organisation'

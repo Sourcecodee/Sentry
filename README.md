@@ -21,6 +21,7 @@ Detection is a separate module from sanitisation and restoration (`src/detection
 | Module | Stage | Role |
 |---|---|---|
 | `regexRecognizer` | 10 | Deterministic patterns: emails, phone-like values |
+| `secretRecognizer` | 15 | Developer secrets: provider API keys, tokens, PEM blocks, connection strings, credential assignments |
 | `contextRecognizer` (names) | 20 | Values after field labels (`Name:`, `Address:`…) and titles (`Dr …`) |
 | `nameDetectionService` | 30 | Capitalised, name-like runs — always review-only suggestions |
 | `contextRecognizer` (fields) | 40 | Address, identifier (incl. Nigerian NIN/BVN), financial and organisation labels |
@@ -44,14 +45,42 @@ The interface is a two-column workspace with a refined slate/indigo theme:
 - **Left column — detection and review.** Uploaded documents, extracted text, custom terms and the detection review list.
 - **Right column — sticky summary.** Sanitised output, a workflow status card (detect → sanitise → restore), the placeholder summary, the pre-export validation report, the session name and the temporary mapping. It stays in view while you scroll the review list.
 - **Full width — restore.** The restore panel sits below both columns, with the live placeholder check and approval flow.
-- The review list is grouped so the most important categories always appear first: **Names → Email → Phone numbers → Addresses**, followed by custom terms, identifiers, financial values and organisations. Each group has a select-all checkbox with a selected count, and detections inside a group are ordered by their first occurrence in the text.
+- The review list is grouped so the most important categories always appear first: **Secrets & API keys → Names → Email → Phone numbers → Addresses**, followed by custom terms, identifiers, financial values and organisations. Each group has a select-all checkbox with a selected count, and detections inside a group are ordered by their first occurrence in the text.
 - The layout collapses to a single column on narrow screens.
+
+## Developer support
+
+Sentry understands the file types developers actually share — configuration, environment files and service JSON — and sanitises them without breaking their syntax.
+
+**Secret and API key detection** (`src/detection/secretRecognizer.ts`) recognises:
+
+- Known provider keys — OpenAI/Anthropic (`sk-…`), AWS (`AKIA…`/`ASIA…`), GitHub (`ghp_…`, `github_pat_…`), Slack (`xox…`), Google (`AIza…`), Stripe (`sk_live_…`, `whsec_…`), JWTs, `Bearer …` tokens, PEM private-key blocks and credentialed connection strings (`postgres://user:password@host…`). These are high-confidence and **preselected** on scan, alongside emails.
+- Generic credential assignments — `DB_PASSWORD=…`, `"clientSecret": "…"`, `api_key: …` (any credential-style name, including `MY_PASSWORD=` and JSON keys). These are marked *review* and require manual approval, so ordinary prose about passwords is never auto-replaced. Obvious placeholders (`changeme`, `undefined`…) are skipped.
+
+The **Secrets & API keys** group leads the review list, and secrets win every placeholder-priority tie — a leaked key never gets a generic label.
+
+**Structure-aware sanitisation** (`src/structuredReplacement.ts`) replaces values without corrupting the file:
+
+| Format | Files | Rule |
+|---|---|---|
+| JSON | `.json` | Replacements happen only inside quoted string contents (keys and values); everything else is byte-identical, and the output stays parseable |
+| JSONL / NDJSON | `.jsonl`, `.ndjson` | Same rule, applied line by line |
+| Env | `.env`, `.env.*`, `*.env` | Value side of `KEY=…` lines only |
+| Properties | `.properties` | Value side after the first `=` or `:` |
+| YAML | `.yaml`, `.yml` | Value side after the first `:` — keys untouched |
+| TOML | `.toml` | Value side after `=` — section headers untouched |
+| INI | `.ini`, `.conf`, `.cfg` | Value side after the first `=` or `:` |
+| Plain | `.txt`, `.md`, `.csv`, `.log`, `.xml`, `.html`… | Whole-text replacement |
+
+- Placeholders are always `[LABEL_00N]` — no quotes, backslashes or separators — so replaced files keep parsing after sanitisation.
+- Comment lines in config formats are sanitised too: a value in a comment is still a leak, and replacing it cannot break parsing.
+- If a `.json`/`.jsonl` file is malformed, replacements still run inside quoted strings and an amber warning appears next to the file telling you to verify the output. Files are never silently reinterpreted.
 
 ## Format and detection limitations
 
 - DOCX sanitisation edits the original document package and retains its structure and styling. The in-app DOCX preview is a structural preview; the downloaded DOCX is the layout-preserving artifact. Image text and document metadata are not inspected; review those manually. Embedded objects and unusual Word content may also need manual review.
 - PDF sanitisation rebuilds a searchable PDF from extracted text with selected values replaced. This changes layout and does not include scanned/image-only text, images, or PDF annotations. Labelled values may appear after colons or dashes, including when extracted text breaks across lines. Text matching tolerates whitespace and split-word differences from PDF extraction. Review the rebuilt output before sharing. Restore PDF placeholders from extracted AI response text; PDF OCR/round-trip restoration is not supported.
-- Supported text-based formats are sanitised in place, retaining the file extension and all content outside selected replacements. The editor itself is only a plain-text detection view.
+- Supported text-based formats are sanitised in place, retaining the file extension and all content outside selected replacements. JSON and config formats are sanitised structure-aware (see **Developer support**); the editor itself is only a plain-text detection view.
 - Emails and phone-like values are detected with local patterns. Names and other labelled values are suggested when recognised field labels are followed by a colon or dash; names may also be suggested when a title provides context. Add known names, organisations, or other sensitive terms to the custom-terms field and review all candidates before sharing.
 - Pattern matching is not a guarantee of complete detection. Review the sanitised output and document contents before sharing externally.
 

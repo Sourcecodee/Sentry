@@ -40,16 +40,18 @@ function escapeRegExp(value: string) {
 /**
  * When two detections share one value (e.g. an NIN seen as both a phone-like
  * number and an identifier), the most specific label claims the placeholder.
+ * Secrets win every tie — an API key must never get a generic label.
  */
 const LABEL_PRIORITY: Record<string, number> = {
-  Email: 0,
-  Identifier: 1,
-  Person: 2,
-  'Custom term': 3,
-  Organisation: 4,
-  Financial: 5,
-  Address: 6,
-  Phone: 7,
+  Secret: 0,
+  Email: 1,
+  Identifier: 2,
+  Person: 3,
+  'Custom term': 4,
+  Organisation: 5,
+  Financial: 6,
+  Address: 7,
+  Phone: 8,
 };
 
 export function sanitiseSelected(

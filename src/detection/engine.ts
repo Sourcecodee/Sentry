@@ -1,6 +1,7 @@
 import { contextFieldsRecognizer, labelledNamesRecognizer } from './contextRecognizer';
 import { nameHeuristicRecognizer } from './nameDetectionService';
 import { regexRecognizer } from './regexRecognizer';
+import { secretRecognizer } from './secretRecognizer';
 import { userDefinedRecognizer } from './userDefinedRecognizer';
 import type { DetectOptions, Detection, DetectionSink, Recognizer } from './types';
 
@@ -11,7 +12,8 @@ import type { DetectOptions, Detection, DetectionSink, Recognizer } from './type
  * them (addendum §9).
  */
 export const defaultRecognizers: Recognizer[] = [
-  regexRecognizer, // 10 — structured patterns
+  regexRecognizer, // 10 — structured patterns (email, phone)
+  secretRecognizer, // 15 — developer secrets and API keys
   labelledNamesRecognizer, // 20 — labelled/titled names
   nameHeuristicRecognizer, // 30 — capitalised name runs
   contextFieldsRecognizer, // 40 — labelled address/id/financial/org values

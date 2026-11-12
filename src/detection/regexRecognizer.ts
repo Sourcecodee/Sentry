@@ -1,4 +1,5 @@
 import { buildDetection } from './build';
+import { findDateMatches } from './dateRecognizer';
 import type { Recognizer } from './types';
 
 /**
@@ -28,6 +29,9 @@ export const regexRecognizer: Recognizer = {
       }
     }
 
+    // Calendar dates look numeric but are never phone numbers.
+    const dateRanges = findDateMatches(text).map((match) => ({ start: match.start, end: match.end }));
+
     for (const match of text.matchAll(phonePattern)) {
       const digits = match[0].replace(/\D/g, '');
       const start = match.index ?? 0;
@@ -35,8 +39,9 @@ export const regexRecognizer: Recognizer = {
       const hasSafeBoundaries =
         !(text[start - 1] && /[\p{L}\p{N}_]/u.test(text[start - 1])) &&
         !(text[end] && /[\p{L}\p{N}_]/u.test(text[end]));
+      const overlapsDate = dateRanges.some((range) => start < range.end && end > range.start);
 
-      if (hasSafeBoundaries && digits.length >= 8 && digits.length <= 15) {
+      if (hasSafeBoundaries && !overlapsDate && digits.length >= 8 && digits.length <= 15) {
         const detection = buildDetection(
           text,
           'Phone',

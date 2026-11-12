@@ -9,9 +9,10 @@ Sentry is a local-first privacy companion for preparing sensitive information be
 - Review detected values before replacement; names and user-defined terms are suggestions, not automatic assumptions.
 - Keep a temporary local mapping for later restoration.
 - Preview uploaded documents separately from the extracted text used for detection.
-- Export searchable PDFs rebuilt from extracted text with selected values replaced. DOCX exports retain their document structure and styling.
+- Export searchable PDFs rebuilt from extracted text with selected values replaced. DOCX exports retain their document structure and styling, and Excel exports preserve workbook styling and formulas.
+- Download sanitised or restored text as Word, Excel, JSON, PDF, TXT or Markdown — the format defaults to the source file.
 - Preserve the original file for preview and download.
-- Allow users to paste AI-processed output back and restore originals.
+- Allow users to paste AI-processed output back and restore originals — or upload a returned Word, Excel, PDF or text file.
 - Keep original values and mappings in memory for the active page session only; refreshing or clearing ends the session.
 
 ## Detection engine
@@ -20,9 +21,10 @@ Detection is a separate module from sanitisation and restoration (`src/detection
 
 | Module | Stage | Role |
 |---|---|---|
+| `dateRecognizer` | 5 | Calendar dates — ISO (`2024-01-15`), separated (`15/01/2024`) and month names — validated so a date is never reported as a phone number |
 | `regexRecognizer` | 10 | Deterministic patterns: emails, phone-like values |
 | `secretRecognizer` | 15 | Developer secrets: provider API keys, tokens, PEM blocks, connection strings, credential assignments |
-| `contextRecognizer` (names) | 20 | Values after field labels (`Name:`, `Address:`…) and titles (`Dr …`) |
+| `contextRecognizer` (names) | 20 | Values after field labels (`Name:`, `Address:`…) and titles (`Dr …`) — a single-token name (`Name: Yusuf`) is detected, while roles and other field values (`Name: Engineer`) are not |
 | `nameDetectionService` | 30 | Capitalised, name-like runs — always review-only suggestions |
 | `contextRecognizer` (fields) | 40 | Address, identifier (incl. Nigerian NIN/BVN), financial and organisation labels |
 | `userDefinedRecognizer` | 50 | Custom terms plus controlled shortened forms of confirmed names |
@@ -40,13 +42,14 @@ Detection is a separate module from sanitisation and restoration (`src/detection
 
 ## Workspace layout
 
-The interface is a two-column workspace with a refined slate/indigo theme:
+The interface is a two-column workspace with a custom "quiet desk" theme — warm paper, ink text, deep pine accents, serif wordmark, mono metadata and small corner radii:
 
 - **Left column — detection and review.** Uploaded documents, extracted text, custom terms and the detection review list.
 - **Right column — sticky summary.** Sanitised output, a workflow status card (detect → sanitise → restore), the placeholder summary, the pre-export validation report, the session name and the temporary mapping. It stays in view while you scroll the review list.
-- **Full width — restore.** The restore panel sits below both columns, with the live placeholder check and approval flow.
-- The review list is grouped so the most important categories always appear first: **Secrets & API keys → Names → Email → Phone numbers → Addresses**, followed by custom terms, identifiers, financial values and organisations. Each group has a select-all checkbox with a selected count, and detections inside a group are ordered by their first occurrence in the text.
+- **Full width — restore.** The restore panel sits below both columns, with the live placeholder check and approval flow. You can paste returned text or upload the file the AI sent back.
+- The review list is grouped so the most important categories always appear first: **Secrets & API keys → Names → Email → Phone numbers → Dates → Addresses**, followed by custom terms, identifiers, financial values and organisations. Each group has a select-all checkbox with a selected count, and detections inside a group are ordered by their first occurrence in the text.
 - The layout collapses to a single column on narrow screens.
+- The header's **End session** button opens a custom confirmation dialog (focus-managed, closes on Escape or backdrop click) that lists exactly what will be cleared before the session is reset.
 
 ## Developer support
 
@@ -76,9 +79,25 @@ The **Secrets & API keys** group leads the review list, and secrets win every pl
 - Comment lines in config formats are sanitised too: a value in a comment is still a leak, and replacing it cannot break parsing.
 - If a `.json`/`.jsonl` file is malformed, replacements still run inside quoted strings and an amber warning appears next to the file telling you to verify the output. Files are never silently reinterpreted.
 
+## Downloads and Excel workbooks
+
+- **Download formats.** The selector follows the file you are working with: upload an Excel workbook and the sanitised download defaults to Excel, upload a Word document and it defaults to Word, and the restored download follows the format of the file that came back. Excel (`.xlsx`), JSON, PDF, TXT and Markdown are available from the same selector, and Word (`.docx`) is the fallback when there is no source file.
+  - The sanitised and restored selectors are independent, so changing one never changes the other.
+  - Word downloads are a clean text document with one paragraph per line; per-file DOCX downloads remain the layout-preserving exports.
+  - Excel downloads turn consistent CSV text into columns (read as raw strings, so `0803…` keeps its leading zero); other text becomes one column per line.
+  - JSON downloads pretty-print valid JSON. Invalid text is rejected with a visible error instead of producing a misleading `.json` file.
+- **Spreadsheet support.** `.xlsx` and `.xlsm` files can be uploaded for detection, sanitisation and restore. Legacy `.xls` is rejected with a prompt to save as `.xlsx`.
+  - Detection text is `Sheet: <name>` followed by rows of non-empty cells joined with `: ` (`Name: Yusuf Mshelia`), with dates shown as ISO (`2024-01-15`) and booleans as `TRUE`/`FALSE`.
+  - Sanitisation edits only the workbook parts that hold values: shared strings and inline strings are replaced, including rich text (per-run first, flattening only when a value spans runs). Numeric, date and boolean cells that exactly match an approved value become inline text cells, keeping their style reference.
+  - All other package parts are left byte-for-byte intact — cell styles, merges, column widths, drawings and macros. SheetJS is used to read display values only; it is never used to rewrite the workbook.
+  - Formula cells are never rewritten: Excel recalculates formulas and would bring the original value back. When a formula cell's displayed value matches an approved value, the file shows a warning asking you to copy the value into a static cell or edit the formula manually.
+  - Restore reverses the same edits. A converted numeric/date cell comes back as text with the same displayed value; the original number formatting is not recreated.
+- **Restore uploads.** The restore panel accepts `.docx`, `.xlsx`, `.xlsm`, `.pdf` and text-based files. Word and Excel files are restored in place and offered as `-restored` downloads. PDFs and text files are loaded into the editor for the normal placeholder check. After a text restore, a round-trip check reports whether the result is identical to the inspected original.
+
 ## Format and detection limitations
 
 - DOCX sanitisation edits the original document package and retains its structure and styling. The in-app DOCX preview is a structural preview; the downloaded DOCX is the layout-preserving artifact. Image text and document metadata are not inspected; review those manually. Embedded objects and unusual Word content may also need manual review.
+- XLSX/XLSM sanitisation edits values inside the original workbook package. Formula cells are skipped because Excel recalculates them; the in-app warning names the count of formula cells that still display an approved value. Matched numeric/date cells are converted to text, and `.xls` is not supported — save as `.xlsx` first. Embedded images, charts, comments and document metadata are not inspected. The in-app spreadsheet preview is the extracted text used for detection, not the full sheet layout.
 - PDF sanitisation rebuilds a searchable PDF from extracted text with selected values replaced. This changes layout and does not include scanned/image-only text, images, or PDF annotations. Labelled values may appear after colons or dashes, including when extracted text breaks across lines. Text matching tolerates whitespace and split-word differences from PDF extraction. Review the rebuilt output before sharing. Restore PDF placeholders from extracted AI response text; PDF OCR/round-trip restoration is not supported.
 - Supported text-based formats are sanitised in place, retaining the file extension and all content outside selected replacements. JSON and config formats are sanitised structure-aware (see **Developer support**); the editor itself is only a plain-text detection view.
 - Emails and phone-like values are detected with local patterns. Names and other labelled values are suggested when recognised field labels are followed by a colon or dash; names may also be suggested when a title provides context. Add known names, organisations, or other sensitive terms to the custom-terms field and review all candidates before sharing.

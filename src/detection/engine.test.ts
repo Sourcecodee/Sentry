@@ -83,6 +83,66 @@ describe('detection engine', () => {
   });
 });
 
+describe('date detection', () => {
+  it('reports calendar dates as Date and never as phone numbers', () => {
+    const text = [
+      'Joined: 2024-01-15',
+      'Reviewed: 15/01/2024',
+      'Signed: 15 January 2025',
+      'Expires: January 2026',
+      'Phone: +44 20 7946 0958',
+    ].join('\n');
+
+    const detections = runDetection(text);
+    const dates = detections.filter((detection) => detection.label === 'Date');
+    const phones = detections.filter((detection) => detection.label === 'Phone');
+
+    expect(dates.map((detection) => detection.value)).toEqual([
+      '2024-01-15',
+      '15/01/2024',
+      '15 January 2025',
+      'January 2026',
+    ]);
+    expect(phones.map((detection) => detection.value)).toEqual(['+44 20 7946 0958']);
+  });
+
+  it('keeps a date with a time out of the phone results', () => {
+    const detections = runDetection('Recorded: 2024-01-15T10:30:00Z');
+
+    expect(detections.filter((detection) => detection.label === 'Date')).toHaveLength(1);
+    expect(detections.filter((detection) => detection.label === 'Phone')).toHaveLength(0);
+  });
+
+  it('ignores values that are not real calendar dates', () => {
+    const detections = runDetection('Reference: 2024-13-45\nOrder: 45-67-9012');
+
+    expect(detections.filter((detection) => detection.label === 'Date')).toHaveLength(0);
+  });
+});
+
+describe('single-name detection', () => {
+  it('detects a single-token name after a name label', () => {
+    const text = 'Name: Yusuf\nEmail: yusuf@example.com';
+    const people = runDetection(text).filter((detection) => detection.label === 'Person');
+
+    expect(people.map((detection) => detection.value)).toEqual(['Yusuf']);
+    expect(people[0].method).toBe('context');
+  });
+
+  it('still detects multi-token names after a name label', () => {
+    const text = 'Name: Yusuf Mshelia\nEmail: yusuf@example.com';
+    const people = runDetection(text).filter((detection) => detection.label === 'Person');
+
+    expect(people.map((detection) => detection.value)).toEqual(['Yusuf Mshelia']);
+  });
+
+  it('does not treat a role or another field as a single name', () => {
+    const text = 'Name: Engineer\nContact: Email\nCandidate: Manager';
+
+    expect(runDetection(text).filter((detection) => detection.label === 'Person')).toHaveLength(0);
+  });
+});
+
 describe('name variation proposals', () => {
   it('proposes first+last and surname for a multi-token confirmed name', () => {
     expect(proposeNameVariations('Yusuf Hyelapa Mshelia')).toEqual(['Yusuf Mshelia', 'Mshelia']);

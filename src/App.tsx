@@ -1,8 +1,16 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { jsPDF } from 'jspdf';
 import * as pdfjsLib from 'pdfjs-dist';
 import mammoth from 'mammoth';
 import { restoreDocx, sanitiseDocx } from './docx';
+import { extractExcelText, isExcelFileName, restoreExcel, sanitiseExcel } from './excel';
+import {
+  createDocxBlob,
+  createJsonBlob,
+  createXlsxBlob,
+  downloadFormatForFileName,
+  type DownloadFormat,
+} from './exportFormats';
 import { createRebuiltTextPdf, extractPdfText, replacePdfTextMatches } from './pdfSanitization';
 import {
   detectSensitiveInformation,
@@ -25,8 +33,6 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
   import.meta.url,
 ).toString();
-
-type DownloadFormat = 'pdf' | 'txt' | 'md';
 
 type UploadedDocument = {
   id: string;
@@ -83,6 +89,7 @@ const DETECTION_GROUP_ORDER: { label: DetectionCandidate['label']; title: string
   { label: 'Person', title: 'Names' },
   { label: 'Email', title: 'Email' },
   { label: 'Phone', title: 'Phone numbers' },
+  { label: 'Date', title: 'Dates' },
   { label: 'Address', title: 'Addresses' },
   { label: 'Custom term', title: 'Custom terms' },
   { label: 'Identifier', title: 'Identifiers' },
@@ -106,6 +113,8 @@ type RestoreConfirmation = {
   values: number;
   missing: number;
   unknown: number;
+  /** True when the restored text is identical to the inspected original. */
+  matchesOriginal: boolean;
 };
 
 function PdfPreview({ url, title }: { url: string; title: string }) {
@@ -186,6 +195,37 @@ function PdfPreview({ url, title }: { url: string; title: string }) {
   );
 }
 
+const DOWNLOAD_FORMATS: { value: DownloadFormat; label: string }[] = [
+  { value: 'docx', label: 'Word (.docx)' },
+  { value: 'xlsx', label: 'Excel (.xlsx)' },
+  { value: 'json', label: 'JSON' },
+  { value: 'pdf', label: 'PDF' },
+  { value: 'txt', label: 'TXT' },
+  { value: 'md', label: 'Markdown' },
+];
+
+function FormatSelect({
+  value,
+  onChange,
+}: {
+  value: DownloadFormat;
+  onChange: (value: DownloadFormat) => void;
+}) {
+  return (
+    <select
+      aria-label="Download format"
+      value={value}
+      onChange={(event) => onChange(event.target.value as DownloadFormat)}
+    >
+      {DOWNLOAD_FORMATS.map((format) => (
+        <option key={format.value} value={format.value}>
+          {format.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 async function readPdfText(file: File) {
   return extractPdfText(file);
 }
@@ -227,8 +267,14 @@ async function extractTextFromFile(file: File) {
     throw new Error('Legacy .doc files are not supported yet. Save the document as .docx to preserve its layout.');
   }
 
-  if (file.type === 'application/vnd.ms-excel' || extension === 'xlsx' || extension === 'xls' || extension === 'csv') {
-    return readTextFile(file);
+  if (isExcelFileName(file.name)) {
+    return extractExcelText(file);
+  }
+
+  if (extension === 'xls' || file.type === 'application/vnd.ms-excel') {
+    throw new Error(
+      'Legacy .xls workbooks are not supported yet. Save the workbook as .xlsx to preserve its formatting.',
+    );
   }
 
   return readTextFile(file);
@@ -241,12 +287,14 @@ function App() {
   const [replacements, setReplacements] = useState<Replacement[]>([]);
   const [sessionName, setSessionName] = useState('demo-session');
   const [uploadedDocuments, setUploadedDocuments] = useState<UploadedDocument[]>([]);
-  const [returnedDocxFiles, setReturnedDocxFiles] = useState<File[]>([]);
+  const [returnedFiles, setReturnedFiles] = useState<File[]>([]);
   const [uploadError, setUploadError] = useState('');
+  const [restoreError, setRestoreError] = useState('');
   const [exportError, setExportError] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [isSanitising, setIsSanitising] = useState(false);
-  const [downloadFormat, setDownloadFormat] = useState<DownloadFormat>('pdf');
+  const [sanitisedDownloadFormat, setSanitisedDownloadFormat] = useState<DownloadFormat>('docx');
+  const [restoredDownloadFormat, setRestoredDownloadFormat] = useState<DownloadFormat>('docx');
   const [customTerms, setCustomTerms] = useState('');
   const [candidates, setCandidates] = useState<DetectionCandidate[]>([]);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<Set<string>>(new Set());
@@ -256,12 +304,65 @@ function App() {
   const [editingValue, setEditingValue] = useState('');
   const [sanitisationReport, setSanitisationReport] = useState<SanitisationReport | null>(null);
   const [restoreConfirmation, setRestoreConfirmation] = useState<RestoreConfirmation | null>(null);
+  const [isClearModalOpen, setIsClearModalOpen] = useState(false);
+  const clearModalRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!purgeLegacySessionStorage()) {
       setExportError('Could not clear previously saved session data from browser storage.');
     }
   }, []);
+
+  useEffect(() => {
+    if (!isClearModalOpen) {
+      return;
+    }
+
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = clearModalRef.current;
+    const focusable = dialog
+      ? Array.from(
+          dialog.querySelectorAll<HTMLElement>(
+            'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+          ),
+        )
+      : [];
+
+    focusable[0]?.focus();
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setIsClearModalOpen(false);
+        return;
+      }
+
+      if (event.key !== 'Tab' || focusable.length === 0) {
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+      previouslyFocused?.focus();
+    };
+  }, [isClearModalOpen]);
 
   useEffect(() => {
     setSanitisationReport(null);
@@ -290,6 +391,8 @@ function App() {
   const acceptedFileTypes = [
     '.pdf',
     '.docx',
+    '.xlsx',
+    '.xlsm',
     '.txt',
     '.md',
     '.csv',
@@ -457,6 +560,14 @@ function App() {
       setUploadError('');
       setCandidates([]);
       setDetectionMessage('');
+
+      // The download format follows the uploaded file: an Excel workbook stays
+      // Excel, a Word document stays Word.
+      if (newDocuments.length > 0) {
+        const sourceFormat = downloadFormatForFileName(newDocuments[0].file.name);
+        setSanitisedDownloadFormat(sourceFormat);
+        setRestoredDownloadFormat(sourceFormat);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to process this file.';
       setUploadError(message);
@@ -466,18 +577,56 @@ function App() {
     }
   };
 
-  const handleReturnedDocxUpload = (event: ChangeEvent<HTMLInputElement>) => {
+  const handleRestoreFileUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const fileInput = event.currentTarget;
     const files = Array.from(event.target.files ?? []);
-    const docxFiles = files.filter((file) => file.name.toLowerCase().endsWith('.docx'));
 
-    if (docxFiles.length !== files.length) {
-      setUploadError('Only DOCX files can be restored with their original layout.');
-    } else {
-      setUploadError('');
+    if (!files.length) {
+      return;
     }
 
-    setReturnedDocxFiles((current) => [...current, ...docxFiles]);
-    event.target.value = '';
+    const binaryFiles: File[] = [];
+    const textParts: string[] = [];
+    const errors: string[] = [];
+    let returnedFormat: DownloadFormat | undefined;
+
+    for (const file of files) {
+      const extension = getFileExtension(file);
+
+      try {
+        if (extension === 'docx' || isExcelFileName(file.name)) {
+          binaryFiles.push(file);
+          returnedFormat ??= downloadFormatForFileName(file.name);
+        } else if (extension === 'pdf' || file.type === 'application/pdf') {
+          textParts.push(await extractPdfText(file));
+          returnedFormat ??= downloadFormatForFileName(file.name);
+        } else if (extension === 'doc' || extension === 'xls') {
+          errors.push(`${file.name}: legacy formats cannot be restored in place. Save it as .docx or .xlsx first.`);
+        } else {
+          textParts.push(await readTextFile(file));
+          returnedFormat ??= downloadFormatForFileName(file.name);
+        }
+      } catch (error) {
+        errors.push(`${file.name}: ${error instanceof Error ? error.message : 'could not be read.'}`);
+      }
+    }
+
+    if (binaryFiles.length > 0) {
+      setReturnedFiles((current) => [...current, ...binaryFiles]);
+    }
+
+    if (textParts.length > 0) {
+      setRestorationText(textParts.join('\n\n---\n\n'));
+      setRestoreConfirmation(null);
+    }
+
+    // The restored download follows the format of the returned file.
+    if (returnedFormat) {
+      setRestoredDownloadFormat(returnedFormat);
+    }
+
+    setRestoreError(errors.join(' '));
+    fileInput.value = '';
   };
 
   const handleDetect = () => {
@@ -616,6 +765,12 @@ function App() {
               await mammoth.convertToHtml({ arrayBuffer: await outputBlob.arrayBuffer() })
             ).value;
             validationText = (await mammoth.extractRawText({ arrayBuffer: await outputBlob.arrayBuffer() })).value;
+          } else if (isExcelFileName(uploaded.file.name)) {
+            const excelResult = await sanitiseExcel(uploaded.file, result.replacements);
+            outputBlob = excelResult.blob;
+            sanitisedText = excelResult.text;
+            validationText = excelResult.text;
+            formatNote = excelResult.note;
           } else if (extension === 'pdf') {
             const pdfResult = replacePdfTextMatches(uploaded.text, result.replacements);
             outputBlob = createRebuiltTextPdf(pdfResult.text);
@@ -686,104 +841,121 @@ function App() {
       return;
     }
 
+    const normalize = (value: string) => value.replace(/\r\n/g, '\n').trimEnd();
     const restored = restoreText(restorationText, replacements);
     setRestorationText(restored);
     setRestoreConfirmation({
       values: placeholderReport.restore.length,
       missing: placeholderReport.missing.length,
       unknown: placeholderReport.unknown.length,
+      matchesOriginal: normalize(restored) === normalize(sourceText),
     });
   };
 
-  const handleDownload = (content: string, label: string, format: DownloadFormat = downloadFormat) => {
+  const handleDownload = async (content: string, label: string, format: DownloadFormat) => {
     const safeName = sessionName.trim() || 'sentry-session';
-    const fileName = `${safeName}-${label}.${format === 'pdf' ? 'pdf' : format}`;
+    const fileName = `${safeName}-${label}.${format}`;
+    setExportError('');
 
-    if (format === 'pdf') {
-      const doc = new jsPDF({ unit: 'pt', format: 'a4' });
-      const pageWidth = doc.internal.pageSize.getWidth();
-      const pageHeight = doc.internal.pageSize.getHeight();
-      const margin = 40;
-      const maxWidth = pageWidth - margin * 2;
-      const text = content || 'No content available';
-      let y = 78;
+    try {
+      if (format === 'pdf') {
+        const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const pageHeight = doc.internal.pageSize.getHeight();
+        const margin = 40;
+        const maxWidth = pageWidth - margin * 2;
+        const text = content || 'No content available';
+        let y = 78;
 
-      doc.setFillColor(15, 118, 110);
-      doc.rect(0, 0, pageWidth, 52, 'F');
-      doc.setTextColor(255, 255, 255);
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(16);
-      doc.text('Sentry', margin, 30);
+        doc.setFillColor(15, 118, 110);
+        doc.rect(0, 0, pageWidth, 52, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(16);
+        doc.text('Sentry', margin, 30);
 
-      doc.setTextColor(15, 23, 42);
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(11);
+        doc.setTextColor(15, 23, 42);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(11);
 
-      for (const paragraph of text.split(/\n+/)) {
-        const trimmed = paragraph.trim();
-        const lines = doc.splitTextToSize(trimmed || ' ', maxWidth);
+        for (const paragraph of text.split(/\n+/)) {
+          const trimmed = paragraph.trim();
+          const lines = doc.splitTextToSize(trimmed || ' ', maxWidth);
 
-        for (const line of lines) {
-          if (y > pageHeight - 22) {
-            doc.addPage();
-            doc.setFillColor(15, 118, 110);
-            doc.rect(0, 0, pageWidth, 26, 'F');
-            doc.setTextColor(255, 255, 255);
-            doc.setFont('helvetica', 'bold');
-            doc.setFontSize(12);
-            doc.text('Sentry', margin, 16);
-            doc.setTextColor(15, 23, 42);
-            doc.setFont('helvetica', 'normal');
-            doc.setFontSize(11);
-            y = 42;
+          for (const line of lines) {
+            if (y > pageHeight - 22) {
+              doc.addPage();
+              doc.setFillColor(15, 118, 110);
+              doc.rect(0, 0, pageWidth, 26, 'F');
+              doc.setTextColor(255, 255, 255);
+              doc.setFont('helvetica', 'bold');
+              doc.setFontSize(12);
+              doc.text('Sentry', margin, 16);
+              doc.setTextColor(15, 23, 42);
+              doc.setFont('helvetica', 'normal');
+              doc.setFontSize(11);
+              y = 42;
+            }
+
+            doc.text(line, margin, y);
+            y += 16;
           }
 
-          doc.text(line, margin, y);
-          y += 16;
+          y += 10;
         }
 
-        y += 10;
+        doc.save(fileName);
+        return;
       }
 
-      doc.save(fileName);
-      return;
+      if (format === 'docx') {
+        downloadBlob(await createDocxBlob(content), fileName);
+        return;
+      }
+
+      if (format === 'xlsx') {
+        downloadBlob(await createXlsxBlob(content), fileName);
+        return;
+      }
+
+      if (format === 'json') {
+        downloadBlob(createJsonBlob(content), fileName);
+        return;
+      }
+
+      const type = format === 'md' ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8';
+      downloadBlob(new Blob([content], { type }), fileName);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : 'The download could not be prepared.');
     }
-
-    const extension = format === 'md' ? 'md' : 'txt';
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-
-    link.href = url;
-    link.download = `${safeName}-${label}.${extension}`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
   };
 
-  const handleDownloadRestoredDocx = async (file: File) => {
+  const handleDownloadRestoredFile = async (file: File) => {
+    setRestoreError('');
+
     try {
-      const blob = await restoreDocx(file, replacements);
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = file.name.replace(/\.docx$/i, '-restored.docx');
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      let blob: Blob;
+      let note: string | undefined;
+
+      if (isExcelFileName(file.name)) {
+        const result = await restoreExcel(file, replacements);
+        blob = result.blob;
+        note = result.note;
+      } else {
+        blob = await restoreDocx(file, replacements);
+      }
+
+      downloadBlob(blob, file.name.replace(/(\.[^.]+)$/, '-restored$1'));
       setExportError('');
+      if (note) {
+        setRestoreError(note);
+      }
     } catch (error) {
-      setExportError(error instanceof Error ? error.message : 'Unable to export the restored DOCX file.');
+      setRestoreError(error instanceof Error ? error.message : 'Unable to export the restored file.');
     }
   };
 
   const handleClearSession = () => {
-    if (!window.confirm(END_SESSION_PROMPT)) {
-      return;
-    }
-
     revokeSessionMedia(uploadedDocuments);
     setSourceText('');
     setReplacements([]);
@@ -791,8 +963,9 @@ function App() {
     setRestorationText('');
     setSessionName('demo-session');
     setUploadedDocuments([]);
-    setReturnedDocxFiles([]);
+    setReturnedFiles([]);
     setUploadError('');
+    setRestoreError('');
     setExportError('');
     setCandidates([]);
     setSelectedCandidateIds(new Set());
@@ -803,19 +976,50 @@ function App() {
     setEditingValue('');
     setSanitisationReport(null);
     setRestoreConfirmation(null);
+    setSanitisedDownloadFormat('docx');
+    setRestoredDownloadFormat('docx');
+    setIsClearModalOpen(false);
   };
 
   return (
     <div className="app-shell">
       <header className="topbar">
-        <div>
-          <p className="eyebrow">Local-first privacy protection</p>
-          <h1>Sentry</h1>
-          <p className="session-notice">Your session stays in memory and is cleared when you reload or end it.</p>
+        <div className="brand">
+          <div className="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path
+                d="M12 2.5 20 5.8v5.4c0 4.6-3.2 8.5-8 10.3-4.8-1.8-8-5.7-8-10.3V5.8L12 2.5Z"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+              />
+              <path
+                d="M8.5 11.2h7M8.5 14.6h4.5"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
+            </svg>
+          </div>
+          <div>
+            <p className="eyebrow">Local-first privacy protection</p>
+            <h1>Sentry</h1>
+            <p className="session-notice">Your session stays in memory and is cleared when you reload or end it.</p>
+          </div>
         </div>
-        <button className="ghost-button" onClick={handleClearSession}>
-          End session and clear data
-        </button>
+        <div className="topbar-actions">
+          <span className="session-state">
+            <span className="session-dot" aria-hidden="true" />
+            Session in memory
+          </span>
+          <button
+            className="ghost-button"
+            onClick={() => setIsClearModalOpen(true)}
+            aria-haspopup="dialog"
+          >
+            End session
+          </button>
+        </div>
       </header>
 
       <main className="workspace">
@@ -838,7 +1042,9 @@ function App() {
             />
             {isUploading && <p className="upload-hint">Reading files locally to prepare previews and detection text…</p>}
             <p className="upload-hint">
-              PDFs are rebuilt from extracted text with selected values replaced. This produces a searchable PDF without the original scanned page image; scanned/image-only text is not detected without OCR.
+              Word and Excel files are sanitised inside the original package, keeping styles and layout. PDFs are
+              rebuilt from extracted text with selected values replaced; scanned/image-only text is not detected
+              without OCR.
             </p>
             {uploadedDocuments.length > 0 && (
               <div className="document-previews">
@@ -1139,12 +1345,11 @@ function App() {
               <h2>2. Sanitised output</h2>
               {sanitisedText && (
                 <div className="download-controls">
-                  <select value={downloadFormat} onChange={(event) => setDownloadFormat(event.target.value as DownloadFormat)}>
-                    <option value="pdf">PDF</option>
-                    <option value="txt">TXT</option>
-                    <option value="md">Markdown</option>
-                  </select>
-                  <button className="ghost-button compact" onClick={() => handleDownload(sanitisedText, 'sanitised')}>
+                  <FormatSelect value={sanitisedDownloadFormat} onChange={setSanitisedDownloadFormat} />
+                  <button
+                    className="ghost-button compact"
+                    onClick={() => void handleDownload(sanitisedText, 'sanitised', sanitisedDownloadFormat)}
+                  >
                     Download
                   </button>
                 </div>
@@ -1274,12 +1479,11 @@ function App() {
           <h2>3. Restore from AI output</h2>
           {restorationText && (
             <div className="download-controls">
-              <select value={downloadFormat} onChange={(event) => setDownloadFormat(event.target.value as DownloadFormat)}>
-                <option value="pdf">PDF</option>
-                <option value="txt">TXT</option>
-                <option value="md">Markdown</option>
-              </select>
-              <button className="ghost-button compact" onClick={() => handleDownload(restorationText, 'restored')}>
+              <FormatSelect value={restoredDownloadFormat} onChange={setRestoredDownloadFormat} />
+              <button
+                className="ghost-button compact"
+                onClick={() => void handleDownload(restorationText, 'restored', restoredDownloadFormat)}
+              >
                 Download restored
               </button>
             </div>
@@ -1303,6 +1507,16 @@ function App() {
               {restoreConfirmation.values} value{restoreConfirmation.values === 1 ? '' : 's'} restored into the
               returned text.
             </p>
+            {restoreConfirmation.matchesOriginal ? (
+              <p className="validation-ok" role="status">
+                Round-trip check passed: the restored text is identical to the original inspected text.
+              </p>
+            ) : (
+              <p className="report-note">
+                Round-trip check: the restored text differs from the original inspected text. Review the restored
+                passage — this is expected when the AI changed wording, but it should not be ignored.
+              </p>
+            )}
             {restoreConfirmation.missing > 0 && (
               <p>
                 {restoreConfirmation.missing} placeholder{restoreConfirmation.missing === 1 ? '' : 's'} the AI
@@ -1385,27 +1599,76 @@ function App() {
         )}
 
         <div className="returned-docx">
-          <label htmlFor="returned-docx">Restore a returned Word document without rebuilding its layout</label>
+          <label htmlFor="returned-file">Upload a returned file to load or restore it</label>
           <input
-            id="returned-docx"
+            id="returned-file"
             type="file"
-            accept=".docx"
+            accept={acceptedFileTypes}
             multiple
-            onChange={handleReturnedDocxUpload}
+            onChange={(event) => void handleRestoreFileUpload(event)}
           />
-          {returnedDocxFiles.map((file, index) => (
+          {returnedFiles.map((file, index) => (
             <button
               key={`${file.name}-${index}`}
               className="ghost-button formatted-export"
-              onClick={() => handleDownloadRestoredDocx(file)}
+              onClick={() => void handleDownloadRestoredFile(file)}
               disabled={replacements.length === 0}
             >
               Download restored {file.name}
             </button>
           ))}
-          <p>Text in Word paragraphs is restored; review images, metadata, and the complete document before using it.</p>
+          <p>
+            Word and Excel files are restored in place, keeping their styles and layout. PDF and text-based files are
+            loaded into the editor above for the normal placeholder check.
+          </p>
+          <p>
+            Excel note: matched numeric and date cells become text cells with the same displayed value, so the
+            original number formatting is not recreated.
+          </p>
+          {restoreError && <p className="upload-error">{restoreError}</p>}
         </div>
       </section>
+
+      {isClearModalOpen && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setIsClearModalOpen(false);
+            }
+          }}
+        >
+          <div
+            className="modal"
+            ref={clearModalRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="clear-session-title"
+            aria-describedby="clear-session-description"
+          >
+            <div className="modal-header">
+              <span className="modal-kicker">Session control</span>
+              <h2 id="clear-session-title">End this session?</h2>
+            </div>
+            <div className="modal-body" id="clear-session-description">
+              <p>{END_SESSION_PROMPT}</p>
+              <ul className="modal-list">
+                <li>Uploaded files and their previews</li>
+                <li>Detected values, edits and selection</li>
+                <li>Placeholder mapping and sanitised output</li>
+              </ul>
+            </div>
+            <div className="modal-actions">
+              <button className="ghost-button" onClick={() => setIsClearModalOpen(false)}>
+                Keep session
+              </button>
+              <button className="danger-button" onClick={handleClearSession}>
+                End session and clear data
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

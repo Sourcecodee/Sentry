@@ -1,4 +1,5 @@
 import { buildDetection } from './build';
+import { isExcludedNameToken } from './nameTokens';
 import type { DetectionLabel, Recognizer } from './types';
 
 /**
@@ -9,8 +10,13 @@ import type { DetectionLabel, Recognizer } from './types';
 
 const fieldSeparator = '\\s*[:=—–-]\\s*';
 
+/**
+ * A name label may introduce a single token (`Name: Yusuf`) or a short
+ * phrase (`Name: Yusuf Mshelia`). The trailing lookahead keeps the match
+ * inside one field so a following label is never swallowed.
+ */
 const labeledNamePattern = new RegExp(
-  `\\b(?:full\\s+name|name|candidate|applicant|employee|contact(?:\\s+person)?|patient|author)${fieldSeparator}([\\p{Lu}][\\p{L}'’-]*(?:\\s+(?:[\\p{Lu}][\\p{L}'’-]*|[\\p{Lu}]\\.?)){1,4})(?=\\s*(?:\\r?\\n|$|[,;]|(?:email|phone|address|program|account\\s+number|employee\\s+id|customer\\s+id|reg(?:istration)?\\s*\\.?\\s*no(?:\\.|\\s+number)?|state\\s+of\\s+origin)\\s*[:=—–-]))`,
+  `\\b(?:full\\s+name|name|candidate|applicant|employee|contact(?:\\s+person)?|patient|author)${fieldSeparator}([\\p{Lu}][\\p{L}'’-]*(?:\\s+(?:[\\p{Lu}][\\p{L}'’-]*|[\\p{Lu}]\\.?)){0,4})(?=\\s*(?:\\r?\\n|$|[,;]|(?:email|phone|address|program|account\\s+number|employee\\s+id|customer\\s+id|reg(?:istration)?\\s*\\.?\\s*no(?:\\.|\\s+number)?|state\\s+of\\s+origin)\\s*[:=—–-]))`,
   'giu',
 );
 
@@ -61,6 +67,13 @@ export const labelledNamesRecognizer: Recognizer = {
                 '',
               )
             : match[0];
+
+        // A single token after a name label must still look like a name:
+        // `Name: Engineer` and `Name: Email` introduce a role or a field.
+        const tokens = value.split(/\s+/).filter(Boolean);
+        if (tokens.length === 1 && isExcludedNameToken(tokens[0])) {
+          continue;
+        }
 
         const detection = buildDetection(
           text,

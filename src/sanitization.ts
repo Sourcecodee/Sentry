@@ -51,7 +51,8 @@ const LABEL_PRIORITY: Record<string, number> = {
   Organisation: 5,
   Financial: 6,
   Address: 7,
-  Phone: 8,
+  Date: 8,
+  Phone: 9,
 };
 
 export function sanitiseSelected(

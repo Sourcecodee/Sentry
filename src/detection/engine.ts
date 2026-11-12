@@ -1,4 +1,5 @@
 import { contextFieldsRecognizer, labelledNamesRecognizer } from './contextRecognizer';
+import { dateRecognizer } from './dateRecognizer';
 import { nameHeuristicRecognizer } from './nameDetectionService';
 import { regexRecognizer } from './regexRecognizer';
 import { secretRecognizer } from './secretRecognizer';
@@ -12,6 +13,7 @@ import type { DetectOptions, Detection, DetectionSink, Recognizer } from './type
  * them (addendum §9).
  */
 export const defaultRecognizers: Recognizer[] = [
+  dateRecognizer, // 5 — calendar dates (never reported as phone numbers)
   regexRecognizer, // 10 — structured patterns (email, phone)
   secretRecognizer, // 15 — developer secrets and API keys
   labelledNamesRecognizer, // 20 — labelled/titled names

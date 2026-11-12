@@ -13,7 +13,7 @@ export type SessionDocumentMedia = {
 export const LEGACY_STORAGE_KEY = 'sentry-session';
 
 export const END_SESSION_PROMPT =
-  'End this session? Original files, detections and the temporary placeholder mapping will be cleared from memory. This cannot be undone.';
+  'Everything in this tab lives in memory only. Ending the session clears it immediately — nothing is kept in browser storage, and this cannot be undone. Download anything you need first.';
 
 /** Revokes every object URL created for this session's documents. */
 export function revokeSessionMedia(documents: SessionDocumentMedia[]) {

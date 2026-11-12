@@ -9,6 +9,7 @@
 export type DetectionLabel =
   | 'Email'
   | 'Phone'
+  | 'Date'
   | 'Person'
   | 'Address'
   | 'Secret'

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Sentry">
+  <rect width="64" height="64" rx="8" fill="#14554b" />
+  <path d="M32 9 51 16.5v13.7C51 42.1 43 51.3 32 56 21 51.3 13 42.1 13 30.2V16.5L32 9z" fill="#fffefb" />
+  <rect x="21" y="26.5" width="22" height="5.5" rx="1.5" fill="#14554b" />
+  <rect x="21" y="36" width="14" height="5.5" rx="1.5" fill="#8a6a35" />
+</svg>

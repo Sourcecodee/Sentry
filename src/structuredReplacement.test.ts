@@ -3,7 +3,7 @@ import type { Replacement } from './mapping';
 import { detectStructuredFormat, replaceStructuredMappedValues } from './structuredReplacement';
 
 const replacements: Replacement[] = [
-  { id: '[SECRET_001]', label: 'Secret', original: 'sk-live-42', placeholder: '[SECRET_001]' },
+  { id: '[SECRET_001]', label: 'Secret', original: 'demo-credential-42', placeholder: '[SECRET_001]' },
   { id: '[EMAIL_002]', label: 'Email', original: 'dev@example.com', placeholder: '[EMAIL_002]' },
 ];
 
@@ -27,7 +27,7 @@ describe('format detection', () => {
 describe('JSON replacement', () => {
   it('replaces inside string contents only, preserving keys, structure and formatting', () => {
     const json = `{
-  "apiKey": "sk-live-42",
+  "apiKey": "demo-credential-42",
   "contact": "dev@example.com",
   "nested": { "notes": "mail dev@example.com", "count": 2 }
 }`;
@@ -57,7 +57,7 @@ describe('JSON replacement', () => {
   });
 
   it('warns when the file is not valid JSON but still sanitises quoted strings', () => {
-    const broken = '{ "apiKey": "sk-live-42", ';
+    const broken = '{ "apiKey": "demo-credential-42", ';
     const result = replaceStructuredMappedValues(broken, replacements, 'json');
 
     expect(result.note).toMatch(/not valid JSON/);
@@ -65,7 +65,7 @@ describe('JSON replacement', () => {
   });
 
   it('falls back to plain replacement when a string is unterminated', () => {
-    const unterminated = '{ "apiKey": "sk-live-42 }';
+    const unterminated = '{ "apiKey": "demo-credential-42 }';
     const result = replaceStructuredMappedValues(unterminated, replacements, 'json');
 
     expect(result.note).toMatch(/not valid JSON/);
@@ -86,7 +86,7 @@ describe('config file replacement', () => {
   it('replaces the value side of .env lines including commented-out ones', () => {
     const env = [
       '# secrets for local dev',
-      'OPENAI_API_KEY=sk-live-42',
+      'OPENAI_API_KEY=demo-credential-42',
       'CONTACT=dev@example.com',
       '# CONTACT=dev@example.com',
     ].join('\n');
@@ -118,7 +118,7 @@ describe('config file replacement', () => {
   });
 
   it('replaces TOML values and leaves section headers alone', () => {
-    const toml = 'token = "sk-live-42"\n[section]\nname = "Sentry"';
+    const toml = 'token = "demo-credential-42"\n[section]\nname = "Sentry"';
 
     const result = replaceStructuredMappedValues(toml, replacements, 'toml');
 

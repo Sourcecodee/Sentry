@@ -9,9 +9,22 @@ lerna-debug.log*
 
 node_modules
 dist
-.env
 dist-ssr
 *.local
+
+# Secrets and local credentials — never commit these
+.env
+.env.*
+*.env
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials.json
+secrets.json
+service-account*.json
 
 # Editor directories and files
 .vscode/*

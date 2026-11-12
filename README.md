@@ -129,3 +129,10 @@ npm run build
 ## Notes
 
 This is an initial MVP prototype based on the Sentry product brief. It intentionally focuses on the two-way sanitisation and restoration flow rather than full enterprise security controls.
+
+## Repository hygiene
+
+- **No credentials are committed.** The repository contains no API keys, tokens, passwords or private keys. The provider patterns in `src/detection/secretRecognizer.ts` are regular expressions, not secrets.
+- **Test fixtures are synthetic.** The credential-shaped values used by the detector tests are assembled at runtime from fragments (`src/detection/secretRecognizer.test.ts`), so no complete credential string exists in the source tree and hosting providers do not mistake them for live keys. None of them is a valid credential.
+- **Local secrets stay local.** `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx` and credential JSON files are ignored by `.gitignore` and must never be committed.
+- **Session data is in-memory only.** Uploads, detections and the placeholder mapping live in the tab's memory and are cleared on reload or when the session ends — nothing sensitive is written to disk or sent anywhere.
